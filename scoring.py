@@ -1,4 +1,7 @@
-def compute_confidence_score(style_score: float, llm_score: float, lexical_score: float) -> tuple:
+BASE_WEIGHTS = {"style": 0.30, "llm": 0.50, "lexical": 0.20}
+
+
+def compute_confidence_score(style_score: float, llm_score: float, lexical_score) -> tuple:
     """
     Ensemble combiner for three independent detection signals into a single
     ai_probability and a confidence (signal-agreement) value.
@@ -14,18 +17,35 @@ def compute_confidence_score(style_score: float, llm_score: float, lexical_score
     noisiest of the three, especially on short text, so it acts as a
     tie-breaking nudge rather than a primary vote.
 
-    Conflict resolution: confidence measures how tightly the three signals
-    agree, generalizing the original |style - llm| formula to three signals
-    via the range (max - min) across all of them:
+    lexical_score may be None (the signal abstains on short text -- see
+    signals/lexical_diversity.py). An abstention is dropped entirely rather
+    than treated as a "neutral 0.5" vote: a fabricated neutral score would
+    still count as disagreement against two signals that strongly agree,
+    systematically pushing the ensemble toward "uncertain" on typical short
+    submissions. Abstaining signals are excluded from both the weighted
+    average (remaining weights renormalize to sum to 1) and the agreement
+    calculation below.
+
+    Conflict resolution: confidence measures how tightly the *voting*
+    signals agree, generalizing the original |style - llm| formula to N
+    signals via the range (max - min) across whichever signals voted:
         confidence = 1.0 - (max(scores) - min(scores))
     A wide spread between any two signals drags confidence down and (via the
     existing threshold table) forces the label to "uncertain" -- no single
     signal can out-vote a disagreement, which is intentional: the ensemble
     is designed to admit uncertainty rather than force a false consensus.
     """
-    scores = (style_score, llm_score, lexical_score)
-    ai_probability = round(0.30 * style_score + 0.50 * llm_score + 0.20 * lexical_score, 4)
-    confidence = round(1.0 - (max(scores) - min(scores)), 4)
+    candidates = {"style": style_score, "llm": llm_score, "lexical": lexical_score}
+    voting = {name: score for name, score in candidates.items() if score is not None}
+
+    weight_total = sum(BASE_WEIGHTS[name] for name in voting)
+    ai_probability = round(
+        sum(BASE_WEIGHTS[name] * score for name, score in voting.items()) / weight_total, 4
+    )
+
+    scores = list(voting.values())
+    confidence = round(1.0 - (max(scores) - min(scores)), 4) if len(scores) > 1 else 1.0
+
     return ai_probability, confidence
 
 

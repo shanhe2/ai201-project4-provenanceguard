@@ -18,6 +18,19 @@ def read_entries(limit: int = 50, offset: int = 0) -> tuple:
     return entries[offset: offset + limit], len(entries)
 
 
+def get_entry(content_id: str) -> dict | None:
+    if not os.path.exists(LOG_PATH):
+        return None
+    with open(LOG_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if entry.get("content_id") == content_id:
+                return entry
+    return None
+
+
 def entry_exists(content_id: str) -> bool:
     if not os.path.exists(LOG_PATH):
         return False
