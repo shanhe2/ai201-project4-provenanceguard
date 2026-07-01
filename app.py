@@ -10,6 +10,8 @@ from flask_limiter.util import get_remote_address
 
 import audit
 from signals.llm_classifier import classify_with_llm
+from signals.stylometric import compute_style_score
+from scoring import compute_confidence_score, generate_label
 
 app = Flask(__name__)
 
@@ -21,7 +23,7 @@ limiter = Limiter(
 
 
 @app.route("/submit", methods=["POST"])
-@limiter.limit("10 per minute")
+@limiter.limit("10 per minute;100 per day")
 def submit():
     data = request.get_json(force=True, silent=True) or {}
     content = data.get("content", "").strip()
@@ -39,22 +41,23 @@ def submit():
     # Signal 1 — LLM classifier (Groq)
     llm_score = classify_with_llm(content)["llm_score"]
 
-    # TODO: Signal 2 — stylometric heuristics
-    style_score = None
+    # Signal 2 — stylometric heuristics
+    style_score = compute_style_score(content)["style_score"]
 
-    # TODO: confidence scorer
-    confidence = None
+    # Confidence scorer
+    ai_probability, confidence = compute_confidence_score(style_score, llm_score)
 
-    # TODO: transparency label generator
-    label_variant = "pending"
-    label_text = "Second signal and scoring not yet wired."
+    # Transparency label generator
+    label_variant, label_text = generate_label(ai_probability, confidence)
 
     audit.append_entry({
         "content_id": content_id,
         "creator_id": creator_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "attribution": label_variant,
+        "ai_probability": ai_probability,
         "confidence": confidence,
+        "style_score": style_score,
         "llm_score": llm_score,
         "status": "classified",
     })
@@ -64,7 +67,7 @@ def submit():
             "content_id": content_id,
             "label_variant": label_variant,
             "label_text": label_text,
-            "ai_probability": llm_score,
+            "ai_probability": ai_probability,
             "confidence": confidence,
             "signals": {
                 "style_score": style_score,
@@ -75,7 +78,42 @@ def submit():
     )
 
 
+@app.route("/appeal", methods=["POST"])
+@limiter.limit("5 per hour")
+def appeal():
+    data = request.get_json(force=True, silent=True) or {}
+    content_id = data.get("content_id", "").strip()
+    creator_reasoning = data.get("creator_reasoning", "").strip()
+    creator_id = data.get("creator_id")
+
+    if not content_id:
+        return jsonify({"error": "content_id is required."}), 400
+    if not (10 <= len(creator_reasoning) <= 1000):
+        return jsonify({"error": "creator_reasoning must be 10-1000 characters."}), 400
+    if not audit.entry_exists(content_id):
+        return jsonify({"error": "content_id not found."}), 404
+
+    updates = {
+        "status": "under_review",
+        "appeal_reasoning": creator_reasoning,
+        "appeal_timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if creator_id:
+        updates["appeal_creator_id"] = creator_id
+
+    audit.update_entry(content_id, updates)
+
+    return jsonify(
+        {
+            "content_id": content_id,
+            "status": "under_review",
+            "message": "Your appeal has been logged. A moderator will review it.",
+        }
+    )
+
+
 @app.route("/log", methods=["GET"])
+@limiter.limit("60 per minute")
 def get_log():
     entries, total = audit.read_entries(limit=50)
     return jsonify({"entries": entries, "total": total})
